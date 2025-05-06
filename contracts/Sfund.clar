@@ -151,3 +151,55 @@
                     received-funds: u0
                 })
             (ok true))))
+
+
+(define-constant MILESTONE-1 u1000000) 
+(define-constant MILESTONE-2 u5000000)
+(define-constant MILESTONE-3 u10000000)
+(define-constant BONUS-AMOUNT u1000)
+
+(define-map MilestoneReached
+    uint
+    bool
+)
+
+(define-public (claim-milestone-bonus)
+    (let (
+        (current-balance (var-get fund-balance))
+        (milestone-1-claimed (default-to false (map-get? MilestoneReached u1)))
+        (milestone-2-claimed (default-to false (map-get? MilestoneReached u2)))
+        (milestone-3-claimed (default-to false (map-get? MilestoneReached u3)))
+        )
+        (begin
+            (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+            (if (and (>= current-balance MILESTONE-1) (not milestone-1-claimed))
+                (begin
+                    (try! (as-contract (stx-transfer? BONUS-AMOUNT tx-sender (var-get admin))))
+                    (map-set MilestoneReached u1 true)
+                    (ok true)
+                )
+                (if (and (>= current-balance MILESTONE-2) (not milestone-2-claimed))
+                    (begin
+                        (try! (as-contract (stx-transfer? BONUS-AMOUNT tx-sender (var-get admin))))
+                        (map-set MilestoneReached u2 true)
+                        (ok true)
+                    )
+                    (if (and (>= current-balance MILESTONE-3) (not milestone-3-claimed))
+                        (begin
+                            (try! (as-contract (stx-transfer? BONUS-AMOUNT tx-sender (var-get admin))))
+                            (map-set MilestoneReached u3 true)
+                            (ok true)
+                        )
+                        ERR-NOT-ELIGIBLE
+                    )
+                )
+            )
+        )
+    ))
+
+(define-read-only (get-milestone-status)
+    (ok {
+        milestone-1: (default-to false (map-get? MilestoneReached u1)),
+        milestone-2: (default-to false (map-get? MilestoneReached u2)),
+        milestone-3: (default-to false (map-get? MilestoneReached u3))
+    }))
