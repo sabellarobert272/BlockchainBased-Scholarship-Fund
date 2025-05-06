@@ -109,3 +109,45 @@
     (ok (default-to 
         { has-active-application: false, received-funds: u0 }
         (map-get? ApplicantStatus applicant))))
+
+
+
+(define-data-var total-applications uint u0)
+(define-data-var total-approved uint u0) 
+(define-data-var total-rejected uint u0)
+(define-data-var total-funds-distributed uint u0)
+
+(define-read-only (get-fund-statistics)
+    (ok {
+        total-applications: (var-get total-applications),
+        total-approved: (var-get total-approved),
+        total-rejected: (var-get total-rejected),
+        total-funds-distributed: (var-get total-funds-distributed),
+        current-balance: (var-get fund-balance)
+    }))
+
+;; Update the apply-for-scholarship function to add:
+(var-set total-applications (+ (var-get total-applications) u1))
+
+;; Update the approve-application function to add:
+(var-set total-approved (+ (var-get total-approved) u1))
+(var-set total-funds-distributed (+ (var-get total-funds-distributed) ))
+
+;; Update the reject-application function to add:
+(var-set total-rejected (+ (var-get total-rejected) u1))
+
+(define-public (withdraw-application (application-id uint))
+    (let (
+        (application (unwrap! (map-get? Applications application-id) ERR-NOT-FOUND))
+        )
+        (begin
+            (asserts! (is-eq tx-sender (get applicant application)) ERR-NOT-AUTHORIZED)
+            (asserts! (is-eq (get status application) "pending") ERR-NOT-ELIGIBLE)
+            (map-set Applications application-id
+                (merge application { status: "withdrawn" }))
+            (map-set ApplicantStatus tx-sender
+                {
+                    has-active-application: false,
+                    received-funds: u0
+                })
+            (ok true))))
