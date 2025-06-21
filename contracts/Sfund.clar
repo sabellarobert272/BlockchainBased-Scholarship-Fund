@@ -203,3 +203,128 @@
         milestone-2: (default-to false (map-get? MilestoneReached u2)),
         milestone-3: (default-to false (map-get? MilestoneReached u3))
     }))
+
+(define-public (set-admin (new-admin principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+        (var-set admin new-admin)
+        (ok true)))
+
+(define-constant ERR-RECURRING-NOT-FOUND (err u109))
+(define-constant ERR-RECURRING-INACTIVE (err u110))
+(define-constant ERR-PAYMENT-NOT-DUE (err u111))
+
+(define-constant FREQUENCY-WEEKLY u1008)
+(define-constant FREQUENCY-MONTHLY u4320)
+(define-constant FREQUENCY-QUARTERLY u12960)
+
+(define-data-var next-recurring-id uint u1)
+
+(define-map RecurringDonations
+    uint
+    {
+        donor: principal,
+        amount: uint,
+        frequency: uint,
+        last-payment: uint,
+        next-payment: uint,
+        total-paid: uint,
+        payment-count: uint,
+        active: bool,
+        created-at: uint
+    }
+)
+
+(define-map DonorRecurring
+    principal
+    uint
+)
+
+(define-public (setup-recurring-donation (amount uint) (frequency uint))
+    (let
+        ((recurring-id (var-get next-recurring-id))
+         (current-block stacks-block-height))
+        (begin
+            (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+            (asserts! (or (is-eq frequency FREQUENCY-WEEKLY) 
+                         (or (is-eq frequency FREQUENCY-MONTHLY) 
+                             (is-eq frequency FREQUENCY-QUARTERLY))) ERR-INVALID-AMOUNT)
+            (asserts! (>= (stx-get-balance tx-sender) amount) ERR-INSUFFICIENT-FUNDS)
+            (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+            (var-set fund-balance (+ (var-get fund-balance) amount))
+            (map-set RecurringDonations recurring-id
+                {
+                    donor: tx-sender,
+                    amount: amount,
+                    frequency: frequency,
+                    last-payment: current-block,
+                    next-payment: (+ current-block frequency),
+                    total-paid: amount,
+                    payment-count: u1,
+                    active: true,
+                    created-at: current-block
+                })
+            (map-set DonorRecurring tx-sender recurring-id)
+            (var-set next-recurring-id (+ recurring-id u1))
+            (ok recurring-id))))
+
+(define-public (process-recurring-payment (recurring-id uint))
+    (let
+        ((donation (unwrap! (map-get? RecurringDonations recurring-id) ERR-RECURRING-NOT-FOUND))
+         (current-block stacks-block-height))
+        (begin
+            (asserts! (get active donation) ERR-RECURRING-INACTIVE)
+            (asserts! (>= current-block (get next-payment donation)) ERR-PAYMENT-NOT-DUE)
+            (asserts! (>= (stx-get-balance (get donor donation)) (get amount donation)) ERR-INSUFFICIENT-FUNDS)
+            (try! (stx-transfer? (get amount donation) (get donor donation) (as-contract tx-sender)))
+            (var-set fund-balance (+ (var-get fund-balance) (get amount donation)))
+            (map-set RecurringDonations recurring-id
+                (merge donation {
+                    last-payment: current-block,
+                    next-payment: (+ current-block (get frequency donation)),
+                    total-paid: (+ (get total-paid donation) (get amount donation)),
+                    payment-count: (+ (get payment-count donation) u1)
+                }))
+            (ok true))))
+
+(define-public (cancel-recurring-donation (recurring-id uint))
+    (let
+        ((donation (unwrap! (map-get? RecurringDonations recurring-id) ERR-RECURRING-NOT-FOUND)))
+        (begin
+            (asserts! (is-eq tx-sender (get donor donation)) ERR-NOT-AUTHORIZED)
+            (asserts! (get active donation) ERR-RECURRING-INACTIVE)
+            (map-set RecurringDonations recurring-id
+                (merge donation { active: false }))
+            (ok true))))
+
+(define-public (update-recurring-amount (recurring-id uint) (new-amount uint))
+    (let
+        ((donation (unwrap! (map-get? RecurringDonations recurring-id) ERR-RECURRING-NOT-FOUND)))
+        (begin
+            (asserts! (is-eq tx-sender (get donor donation)) ERR-NOT-AUTHORIZED)
+            (asserts! (get active donation) ERR-RECURRING-INACTIVE)
+            (asserts! (> new-amount u0) ERR-INVALID-AMOUNT)
+            (map-set RecurringDonations recurring-id
+                (merge donation { amount: new-amount }))
+            (ok true))))
+
+(define-read-only (get-recurring-donation (recurring-id uint))
+    (ok (unwrap! (map-get? RecurringDonations recurring-id) ERR-RECURRING-NOT-FOUND)))
+
+(define-read-only (get-donor-recurring (donor principal))
+    (ok (map-get? DonorRecurring donor)))
+
+(define-read-only (get-due-payments (recurring-id uint))
+    (let
+        ((donation (unwrap! (map-get? RecurringDonations recurring-id) ERR-RECURRING-NOT-FOUND)))
+        (ok {
+            is-due: (and (get active donation) (>= stacks-block-height (get next-payment donation))),
+            next-payment-block: (get next-payment donation),
+            current-block: stacks-block-height
+        })))
+
+(define-read-only (get-recurring-stats)
+    (ok {
+        total-recurring-setups: (- (var-get next-recurring-id) u1),
+        current-block: stacks-block-height
+    }))
