@@ -9,6 +9,64 @@
 (define-data-var next-application-id uint u1)
 (define-data-var admin principal tx-sender)
 
+
+(define-constant ERR-PERFORMANCE-NOT-FOUND (err u112))
+(define-constant ERR-PERFORMANCE-ALREADY-SUBMITTED (err u113))
+(define-constant ERR-INVALID-PERFORMANCE-DATA (err u114))
+(define-constant ERR-PERFORMANCE-INSUFFICIENT (err u115))
+(define-constant ERR-INSTALLMENT-NOT-DUE (err u116))
+
+(define-constant MIN-GPA-REQUIREMENT u300)
+(define-constant MIN-CREDIT-HOURS u12)
+(define-constant MIN-SERVICE-HOURS u20)
+(define-constant PERFORMANCE-REVIEW-PERIOD u8760)
+
+(define-data-var next-performance-id uint u1)
+
+(define-map PerformanceTracking
+    uint
+    {
+        scholarship-id: uint,
+        student: principal,
+        semester: uint,
+        gpa: uint,
+        credit-hours-completed: uint,
+        community-service-hours: uint,
+        graduation-progress: uint,
+        verified: bool,
+        submitted-at: uint,
+        verified-by: (optional principal),
+        meets-requirements: bool
+    }
+)
+
+(define-map ScholarshipInstallments
+    uint
+    {
+        student: principal,
+        total-amount: uint,
+        installments-total: uint,
+        installments-paid: uint,
+        installment-amount: uint,
+        next-installment-due: uint,
+        last-performance-check: uint,
+        performance-streak: uint,
+        active: bool,
+        created-at: uint
+    }
+)
+
+(define-map StudentPerformanceHistory
+    principal
+    {
+        total-submissions: uint,
+        approved-submissions: uint,
+        current-streak: uint,
+        last-submission: uint,
+        scholarship-id: (optional uint)
+    }
+)
+
 (define-map Applications
     uint 
     {
@@ -327,4 +385,172 @@
     (ok {
         total-recurring-setups: (- (var-get next-recurring-id) u1),
         current-block: stacks-block-height
+    }))
+
+
+
+(define-public (setup-performance-based-scholarship (student principal) (total-amount uint) (installments uint))
+    (let
+        ((scholarship-id (var-get next-application-id))
+         (installment-amount (/ total-amount installments))
+         (current-block stacks-block-height))
+        (begin
+            (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+            (asserts! (> total-amount u0) ERR-INVALID-AMOUNT)
+            (asserts! (and (>= installments u2) (<= installments u8)) ERR-INVALID-AMOUNT)
+            (asserts! (<= total-amount (var-get fund-balance)) ERR-INSUFFICIENT-FUNDS)
+            (map-set ScholarshipInstallments scholarship-id
+                {
+                    student: student,
+                    total-amount: total-amount,
+                    installments-total: installments,
+                    installments-paid: u0,
+                    installment-amount: installment-amount,
+                    next-installment-due: (+ current-block PERFORMANCE-REVIEW-PERIOD),
+                    last-performance-check: current-block,
+                    performance-streak: u0,
+                    active: true,
+                    created-at: current-block
+                })
+            (map-set StudentPerformanceHistory student
+                {
+                    total-submissions: u0,
+                    approved-submissions: u0,
+                    current-streak: u0,
+                    last-submission: u0,
+                    scholarship-id: (some scholarship-id)
+                })
+            (var-set next-application-id (+ scholarship-id u1))
+            (ok scholarship-id))))
+
+(define-public (submit-performance-data (scholarship-id uint) (semester uint) (gpa uint) (credit-hours uint) (service-hours uint) (graduation-progress uint))
+    (let
+        ((scholarship (unwrap! (map-get? ScholarshipInstallments scholarship-id) ERR-NOT-FOUND))
+         (student-history (default-to 
+             { total-submissions: u0, approved-submissions: u0, current-streak: u0, last-submission: u0, scholarship-id: none }
+             (map-get? StudentPerformanceHistory tx-sender)))
+         (performance-id (var-get next-performance-id))
+         (current-block stacks-block-height))
+        (begin
+            (asserts! (is-eq tx-sender (get student scholarship)) ERR-NOT-AUTHORIZED)
+            (asserts! (get active scholarship) ERR-NOT-ELIGIBLE)
+            (asserts! (>= gpa u0) ERR-INVALID-PERFORMANCE-DATA)
+            (asserts! (>= credit-hours u0) ERR-INVALID-PERFORMANCE-DATA)
+            (asserts! (>= service-hours u0) ERR-INVALID-PERFORMANCE-DATA)
+            (asserts! (and (>= graduation-progress u0) (<= graduation-progress u100)) ERR-INVALID-PERFORMANCE-DATA)
+            (asserts! (>= current-block (get next-installment-due scholarship)) ERR-INSTALLMENT-NOT-DUE)
+            (map-set PerformanceTracking performance-id
+                {
+                    scholarship-id: scholarship-id,
+                    student: tx-sender,
+                    semester: semester,
+                    gpa: gpa,
+                    credit-hours-completed: credit-hours,
+                    community-service-hours: service-hours,
+                    graduation-progress: graduation-progress,
+                    verified: false,
+                    submitted-at: current-block,
+                    verified-by: none,
+                    meets-requirements: false
+                })
+            (map-set StudentPerformanceHistory tx-sender
+                (merge student-history {
+                    total-submissions: (+ (get total-submissions student-history) u1),
+                    last-submission: current-block
+                }))
+            (var-set next-performance-id (+ performance-id u1))
+            (ok performance-id))))
+
+(define-public (verify-performance-data (performance-id uint))
+    (let
+        ((performance (unwrap! (map-get? PerformanceTracking performance-id) ERR-PERFORMANCE-NOT-FOUND))
+         (scholarship (unwrap! (map-get? ScholarshipInstallments (get scholarship-id performance)) ERR-NOT-FOUND))
+         (student-history (unwrap! (map-get? StudentPerformanceHistory (get student performance)) ERR-NOT-FOUND))
+         (meets-requirements (and 
+             (>= (get gpa performance) MIN-GPA-REQUIREMENT)
+             (>= (get credit-hours-completed performance) MIN-CREDIT-HOURS)
+             (>= (get community-service-hours performance) MIN-SERVICE-HOURS))))
+        (begin
+            (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+            (asserts! (not (get verified performance)) ERR-PERFORMANCE-ALREADY-SUBMITTED)
+            (map-set PerformanceTracking performance-id
+                (merge performance {
+                    verified: true,
+                    verified-by: (some tx-sender),
+                    meets-requirements: meets-requirements
+                }))
+            (if meets-requirements
+                (begin
+                    (map-set StudentPerformanceHistory (get student performance)
+                        (merge student-history {
+                            approved-submissions: (+ (get approved-submissions student-history) u1),
+                            current-streak: (+ (get current-streak student-history) u1)
+                        }))
+                    (ok true))
+                (begin
+                    (map-set StudentPerformanceHistory (get student performance)
+                        (merge student-history { current-streak: u0 }))
+                    (ok false))))))
+
+(define-public (process-performance-payout (performance-id uint))
+    (let
+        ((performance (unwrap! (map-get? PerformanceTracking performance-id) ERR-PERFORMANCE-NOT-FOUND))
+         (scholarship (unwrap! (map-get? ScholarshipInstallments (get scholarship-id performance)) ERR-NOT-FOUND))
+         (current-block stacks-block-height))
+        (begin
+            (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+            (asserts! (get verified performance) ERR-NOT-ELIGIBLE)
+            (asserts! (get meets-requirements performance) ERR-PERFORMANCE-INSUFFICIENT)
+            (asserts! (get active scholarship) ERR-NOT-ELIGIBLE)
+            (asserts! (< (get installments-paid scholarship) (get installments-total scholarship)) ERR-NOT-ELIGIBLE)
+            (try! (as-contract (stx-transfer? (get installment-amount scholarship) tx-sender (get student scholarship))))
+            (var-set fund-balance (- (var-get fund-balance) (get installment-amount scholarship)))
+            (map-set ScholarshipInstallments (get scholarship-id performance)
+                (merge scholarship {
+                    installments-paid: (+ (get installments-paid scholarship) u1),
+                    next-installment-due: (+ current-block PERFORMANCE-REVIEW-PERIOD),
+                    last-performance-check: current-block,
+                    performance-streak: (+ (get performance-streak scholarship) u1),
+                    active: (< (+ (get installments-paid scholarship) u1) (get installments-total scholarship))
+                }))
+            (ok true))))
+
+(define-read-only (get-scholarship-progress (scholarship-id uint))
+    (let
+        ((scholarship (unwrap! (map-get? ScholarshipInstallments scholarship-id) ERR-NOT-FOUND)))
+        (ok {
+            student: (get student scholarship),
+            progress-percentage: (/ (* (get installments-paid scholarship) u100) (get installments-total scholarship)),
+            amount-paid: (* (get installments-paid scholarship) (get installment-amount scholarship)),
+            amount-remaining: (* (- (get installments-total scholarship) (get installments-paid scholarship)) (get installment-amount scholarship)),
+            next-due: (get next-installment-due scholarship),
+            performance-streak: (get performance-streak scholarship),
+            active: (get active scholarship)
+        })))
+
+(define-read-only (get-student-performance-summary (student principal))
+    (let
+        ((history (default-to 
+            { total-submissions: u0, approved-submissions: u0, current-streak: u0, last-submission: u0, scholarship-id: none }
+            (map-get? StudentPerformanceHistory student))))
+        (ok {
+            total-submissions: (get total-submissions history),
+            approved-submissions: (get approved-submissions history),
+            approval-rate: (if (> (get total-submissions history) u0) 
+                (/ (* (get approved-submissions history) u100) (get total-submissions history)) 
+                u0),
+            current-streak: (get current-streak history),
+            last-submission: (get last-submission history),
+            has-active-scholarship: (is-some (get scholarship-id history))
+        })))
+
+(define-read-only (get-performance-data (performance-id uint))
+    (ok (unwrap! (map-get? PerformanceTracking performance-id) ERR-PERFORMANCE-NOT-FOUND)))
+
+(define-read-only (get-performance-requirements)
+    (ok {
+        minimum-gpa: MIN-GPA-REQUIREMENT,
+        minimum-credit-hours: MIN-CREDIT-HOURS,
+        minimum-service-hours: MIN-SERVICE-HOURS,
+        review-period-blocks: PERFORMANCE-REVIEW-PERIOD
     }))
