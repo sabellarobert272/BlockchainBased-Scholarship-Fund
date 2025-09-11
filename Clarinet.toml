@@ -1,0 +1,29 @@
+[project]
+name = 'Sfund'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Sfund]
+path = 'contracts/Sfund.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.AlumniNetwork]
+path = 'contracts/AlumniNetwork.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.AnalyticsEngine]
+path = 'contracts/AnalyticsEngine.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
